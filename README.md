@@ -1,163 +1,61 @@
 # Bank of CLI
 
-A banking app that runs in the terminal. You can make an account, log in with a PIN, check your balance, deposit, withdraw, send money to another account, and see your past transactions.
+This is a banking application that runs in the terminal. A user can register an account, log in with a PIN, check their balance, deposit money, withdraw money, transfer money to another account, and look at their transaction history. It's written in Java and uses PostgreSQL for the database, with JDBC to connect to it. Maven handles the build and JUnit 5 is used for the tests.
 
-Made with Java, PostgreSQL, JDBC, Maven, and JUnit 5.
+The application is split into three layers, and each layer only calls the one below it.
 
-## How it's set up
+BankMenu is the API layer. It's the part the user actually sees. It prints the menu, reads whatever they type in, converts it to the right type, and prints the result back out. It doesn't contain any SQL and it doesn't decide whether an operation is allowed.
 
-There are three layers:
+AccountService is the business layer and it's where all the banking rules are. Before anything happens it checks that the amount is positive, that the account actually exists, and that there's enough money in it. If any of those checks fail it prints a message and stops right there. Only when everything passes does it call the repository. It also calls both repositories when an operation works, because something like a deposit means changing the balance and also saving a record of what happened.
 
-```
-BankMenu              the menu the user sees
-    |
-AccountService        the banking rules
-    |
-AccountRepository     the SQL
-TransactionRepository
-    |
-PostgreSQL
-```
+AccountRepository and TransactionRepository are the repository layer and they're the only classes that run SQL. They open a connection, run the query, and turn the rows that come back into Java objects. They don't make any decisions, they just do what they're told.
 
-Each layer only talks to the one under it. BankMenu doesn't write any SQL, and the repositories don't decide if something is allowed.
-
-BankMenu prints the menu and reads what the user types.
-
-AccountService has the rules. Before it does anything it checks that the amount is positive, the account exists, and there's enough money. It also calls both repositories, because a deposit means changing the balance and also saving a record of it.
-
-AccountRepository and TransactionRepository run the SQL and turn rows from the database into Java objects.
-
-Account and Transaction are just classes that hold data. They get passed between the layers.
+Account and Transaction are model classes that hold data. They aren't really a layer, they're just what the data looks like while it's being passed between the layers.
 
 ## Database
 
-```sql
-CREATE TABLE accounts (
-    account_id SERIAL PRIMARY KEY,
-    pin VARCHAR(255) NOT NULL,        -- this is the hashed pin, not the real one
-    balance DECIMAL(10, 2) NOT NULL DEFAULT 0.00
-);
+There are two tables. The accounts table has account_id, pin, and balance. The transactions table has transaction_id, account_id, related_account_id, transaction_type, amount, and timestamp. One account can have many transactions, so account_id in the transactions table is a foreign key pointing back to accounts.
 
-CREATE TABLE transactions (
-    transaction_id SERIAL PRIMARY KEY,
-    account_id INTEGER,
-    related_account_id INTEGER,        -- the other account if it's a transfer
-    transaction_type VARCHAR(20),      -- DEPOSIT, WITHDRAW, TRANSFER
-    amount DECIMAL(10, 2),
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (account_id) REFERENCES accounts(account_id)
-);
-```
+The pin column is VARCHAR(255) because it doesn't hold the actual PIN, it holds a BCrypt hash, and those come out to 60 characters. The related_account_id column is only used for transfers, since a deposit or withdrawal only involves one account, so it's null most of the time.
 
-I used DECIMAL for money in the database and BigDecimal in Java. Doubles round wrong and you can't do that with money.
+All the money columns use DECIMAL in the database and BigDecimal in Java. Doubles round incorrectly and that isn't acceptable when you're dealing with money.
 
 ## How to run it
 
-You need Java 17+, Maven, and PostgreSQL.
+You need Java 17 or higher, Maven, and PostgreSQL installed. First create the database with `psql postgres -c "CREATE DATABASE bankofcli;"`, then connect to it with `psql bankofcli` and create the two tables. Put your PostgreSQL username and password into DatabaseConnection.java. Then run `mvn clean compile` followed by `mvn exec:java -Dexec.mainClass="com.bankofcli.Main"`.
 
-Make the database:
+To run the tests, use `mvn test`. There are 27 of them, two for every method in the service and repository layers. One test checks that the method works when it should and the other checks that it fails properly when it should.
 
-```bash
-psql postgres -c "CREATE DATABASE bankofcli;"
-```
+## Transfers
 
-Connect to it and run the two CREATE TABLE statements above:
+Transfers were the most complicated part. A transfer changes two accounts, and if only one of them ends up changing then money either gets created or destroyed. So both updates have to happen together or neither of them can.
 
-```bash
-psql bankofcli
-```
+That's why AccountRepository.transfer manages its own connection instead of using try-with-resources like the other methods do. It turns off auto-commit, runs both updates, and only commits if both of them worked. If anything goes wrong it rolls back and neither account changes.
 
-Put your PostgreSQL username and password in DatabaseConnection.java:
+## A bug I found
 
-```java
-private static final String URL = "jdbc:postgresql://localhost:5432/bankofcli";
-private static final String USER = "your_username";
-private static final String PASSWORD = "your_password";
-```
+I wrote a test that transferred money to an account that doesn't exist. I expected it to fail, but it came back true.
 
-Then run it:
+The reason is that an UPDATE statement that doesn't match any rows isn't actually an error in SQL. It just succeeds without doing anything. So the money came out of the first account, the second update did nothing at all, no exception was ever thrown, and the whole thing committed. The money just disappeared.
 
-```bash
-mvn clean compile
-mvn exec:java -Dexec.mainClass="com.bankofcli.Main"
-```
+I fixed it by checking the number that executeUpdate() returns, which is how many rows it changed, and rolling back if it comes back as zero.
 
-## Tests
+The interesting part is that I had run the application manually plenty of times and never hit this. AccountService checks that both accounts exist before it calls the repository, so going through the menu you never reach the repository's missing check. Only a unit test could find it, because the test calls the repository directly and skips the service.
 
-```bash
-mvn test
-```
+## PINs
 
-There are 27 tests. Two for each method in the service and repository layers, one that should pass and one that should fail.
+PINs get hashed with BCrypt before they go into the database, so the real PIN is never stored anywhere. gensalt() generates a new random salt every time, which means two people who pick the same PIN still end up with completely different hashes. When someone logs in, nothing gets decrypted. It takes the PIN they typed, hashes it using the salt that's stored inside the existing hash, and checks whether the two match.
 
-## Things worth explaining
+## Logging
 
-### Transfers
+Successful logins and failed login attempts get written to bank.log. Database errors go into the log file instead of being printed on screen, so the user gets a normal message instead of a stack trace.
 
-A transfer changes two accounts. If only one of them changes then money gets made or lost, so both have to happen or neither does.
+## Things I'd fix
 
-That's why AccountRepository.transfer handles the connection itself instead of using try-with-resources. It turns off auto-commit, runs both updates, and only commits if they both worked:
+The tests run against the real database, so every time I run them the balances change and new accounts get created. They still pass because I wrote them to check the difference rather than an exact number, but I'd use a separate test database if I did it again.
 
-```java
-conn.setAutoCommit(false);
-// take money from the first account, check rows affected
-// add money to the second account, check rows affected
-conn.commit();
-```
+The balance update and the transaction record go through two different connections, so if the program crashed in between them you'd have a balance that changed with no record of it.
 
-If something goes wrong it rolls back and nothing changes.
+Transfers only show up in the sender's transaction history. getTransactionsByAccountId only filters on account_id, and a transfer stores the other account in related_account_id, so the person receiving the money doesn't see it in their history.
 
-### A bug I found
-
-I wrote a test that transferred money to an account that doesn't exist. I thought it would fail but it returned true.
-
-The reason is that an UPDATE that doesn't match any rows isn't an error in SQL. It just says it worked. So the money came out of the first account, the second update did nothing, no exception happened, and it committed. The money was just gone.
-
-I fixed it by checking the number that executeUpdate() gives back, which is how many rows it changed, and rolling back if it's zero.
-
-I never hit this running the app myself because AccountService checks both accounts exist before it calls the repository. Only the test found it, because the test calls the repository directly.
-
-### PINs
-
-PINs get hashed with BCrypt before saving, so the real PIN is never in the database:
-
-```java
-String hashedPin = BCrypt.hashpw(pin, BCrypt.gensalt());
-```
-
-gensalt() makes a random salt every time, so two people with the same PIN get different hashes. Logging in doesn't decrypt anything. It hashes what you typed using the salt that's already inside the stored hash and checks if they match.
-
-### Transaction history
-
-Every deposit, withdrawal, and transfer that works saves a row in the transactions table with the type, amount, and time.
-
-### Logging
-
-Logins and failed logins get written to bank.log. Database errors go in the log file instead of showing up on screen so the user doesn't see a stack trace.
-
-## Things that could be better
-
-- The tests use the real database, so the balance changes and new accounts get added every time I run them. They still pass because I wrote them to check the difference instead of an exact number, but it would be better to use a separate test database.
-- The balance update and the transaction record use two different connections, so if the program crashed in between you'd have a balance change with no record of it.
-- Transfers only show up in the sender's history. getTransactionsByAccountId only looks at account_id, and a transfer puts the other account in related_account_id, so the person getting the money doesn't see it.
-- Nothing handles two things happening at once. Two transfers on the same account at the same time could mess each other up.
-
-## Files
-
-```
-src/
-  main/java/com/bankofcli/
-    Main.java
-    api/BankMenu.java
-    business/AccountService.java
-    model/Account.java
-    model/Transaction.java
-    repository/AccountRepository.java
-    repository/TransactionRepository.java
-    repository/DatabaseConnection.java
-    util/LoggerUtil.java
-  test/java/com/bankofcli/
-    business/AccountServiceTest.java
-    repository/AccountRepositoryTest.java
-pom.xml
-```
+There's nothing handling two operations happening at the same time. The transaction gives atomicity but not isolation, so two transfers on the same account at once could interfere with each other.
