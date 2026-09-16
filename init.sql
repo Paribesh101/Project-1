@@ -13,3 +13,8 @@ CREATE TABLE transactions (
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (account_id) REFERENCES accounts(account_id)
 );
+
+INSERT INTO accounts (pin, balance) VALUES
+    ('$2a$10$Tblp0/5MtD4UrcWoLiLK0O8rEvfhXlOumv3YneptS0ynrNmfCI3eC', 1000.00),
+    ('$2a$10$Tblp0/5MtD4UrcWoLiLK0O8rEvfhXlOumv3YneptS0ynrNmfCI3eC', 500.00),
+    ('$2a$10$Tblp0/5MtD4UrcWoLiLK0O8rEvfhXlOumv3YneptS0ynrNmfCI3eC', 300.00);
