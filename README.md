@@ -1,6 +1,6 @@
 # Bank of CLI
 
-This is a banking application that runs in the terminal. A user can register an account, log in with a PIN, check their balance, deposit money, withdraw money, transfer money to another account, and look at their transaction history. It's written in Java and uses PostgreSQL for the database, with JDBC to connect to it. Maven handles the build and JUnit 5 is used for the tests.
+This is a banking application that runs in the terminal. A user can register an account, log in with a PIN, check their balance, deposit money, withdraw money, transfer money to another account, and look at their transaction history. It's written in Java and uses PostgreSQL for the database, with JDBC to connect to it. Maven handles the build and JUnit 5 is used for the tests. The database runs in Docker so it can be set up with a single command.
 
 The application is split into three layers, and each layer only calls the one below it.
 
@@ -22,7 +22,34 @@ All the money columns use DECIMAL in the database and BigDecimal in Java. Double
 
 ## How to run it
 
-You need Java 17 or higher, Maven, and PostgreSQL installed. First create the database with `psql postgres -c "CREATE DATABASE bankofcli;"`, then connect to it with `psql bankofcli` and create the two tables. Put your PostgreSQL username and password into DatabaseConnection.java. Then run `mvn clean compile` followed by `mvn exec:java -Dexec.mainClass="com.bankofcli.Main"`.
+You need Java 17 or higher, Maven, and Docker Desktop installed. Make sure Docker Desktop is actually running before you start.
+
+Clone the repo and cd into it, then start the database:
+
+
+docker compose up -d
+
+
+That spins up a PostgreSQL container and runs init.sql automatically, which creates both tables. You don't have to set up a database yourself or change any connection settings.
+
+Give it a few seconds, then check the tables are there:
+
+
+docker compose exec db psql -U bankuser -d bankofcli -c "\dt"
+
+
+Then build and run the application:
+
+
+mvn clean compile
+mvn exec:java -Dexec.mainClass="com.bankofcli.Main"
+
+
+The database starts empty, so register an account first. It'll give you an account ID, and you use that with your PIN to log in.
+
+When you're done, stop the container with `docker compose down`. If you want to wipe the data and start fresh, use `docker compose down -v`.
+
+One thing to watch out for: if you already have PostgreSQL running locally on port 5432, the container won't be able to start. Stop your local instance first.
 
 To run the tests, use `mvn test`. There are 27 of them, two for every method in the service and repository layers. One test checks that the method works when it should and the other checks that it fails properly when it should.
 
