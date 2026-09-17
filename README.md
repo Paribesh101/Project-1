@@ -1,88 +1,67 @@
-# Bank of CLI
+Bank of CLI
 
-This is a banking application that runs in the terminal. A user can register an account, log in with a PIN, check their balance, deposit money, withdraw money, transfer money to another account, and look at their transaction history. It's written in Java and uses PostgreSQL for the database, with JDBC to connect to it. Maven handles the build and JUnit 5 is used for the tests. The database runs in Docker so it can be set up with a single command.
+A terminal banking application. Register, log in with a PIN, check your balance, deposit, withdraw, transfer money, and view transaction history.
 
-The application is split into three layers, and each layer only calls the one below it.
+Java, PostgreSQL, JDBC, Maven, JUnit 5. Database runs in Docker.
 
-BankMenu is the API layer. It's the part the user actually sees. It prints the menu, reads whatever they type in, converts it to the right type, and prints the result back out. It doesn't contain any SQL and it doesn't decide whether an operation is allowed.
+Layers
 
-AccountService is the business layer and it's where all the banking rules are. Before anything happens it checks that the amount is positive, that the account actually exists, and that there's enough money in it. If any of those checks fail it prints a message and stops right there. Only when everything passes does it call the repository. It also calls both repositories when an operation works, because something like a deposit means changing the balance and also saving a record of what happened.
+BankMenu prints the menu and reads input. No SQL.
 
-AccountRepository and TransactionRepository are the repository layer and they're the only classes that run SQL. They open a connection, run the query, and turn the rows that come back into Java objects. They don't make any decisions, they just do what they're told.
+AccountService holds the rules — checks the amount is positive, the account exists, and there's enough money before anything happens. Calls both repositories, since a deposit updates a balance and saves a record.
 
-Account and Transaction are model classes that hold data. They aren't really a layer, they're just what the data looks like while it's being passed between the layers.
+AccountRepository and TransactionRepository run the SQL and turn rows into objects.
 
-## Database
+Account and Transaction hold data as it moves between layers.
 
-There are two tables. The accounts table has account_id, pin, and balance. The transactions table has transaction_id, account_id, related_account_id, transaction_type, amount, and timestamp. One account can have many transactions, so account_id in the transactions table is a foreign key pointing back to accounts.
+Each layer only calls the one below it.
 
-The pin column is VARCHAR(255) because it doesn't hold the actual PIN, it holds a BCrypt hash, and those come out to 60 characters. The related_account_id column is only used for transfers, since a deposit or withdrawal only involves one account, so it's null most of the time.
+Database
 
-All the money columns use DECIMAL in the database and BigDecimal in Java. Doubles round incorrectly and that isn't acceptable when you're dealing with money.
+accounts — account_id, pin, balance
+transactions — transaction_id, account_id, related_account_id, transaction_type, amount, timestamp
 
-## How to run it
+One account has many transactions. The pin column is VARCHAR(255) because it holds a BCrypt hash, not the PIN. related_account_id is only used for transfers. Money uses DECIMAL and BigDecimal, since doubles round incorrectly.
 
-You need Java 17 or higher, Maven, and Docker Desktop installed. Make sure Docker Desktop is actually running before you start.
+Running it
 
-Clone the repo and cd into it, then start the database:
+Needs Java 17+, Maven, and Docker Desktop running.
 
-
+bash
 docker compose up -d
-
-
-That spins up a PostgreSQL container and runs init.sql automatically, which creates both tables. You don't have to set up a database yourself or change any connection settings.
-
-Give it a few seconds, then check the tables are there:
-
-
-docker compose exec db psql -U bankuser -d bankofcli -c "\dt"
-
-
-Then build and run the application:
-
-
 mvn clean compile
 mvn exec:java -Dexec.mainClass="com.bankofcli.Main"
 
+Accounts 1, 2, and 3 are seeded with PIN 9999.
 
-The database starts empty, so register an account first. It'll give you an account ID, and you use that with your PIN to log in.
+Stop with docker compose down -v. If PostgreSQL is already on port 5432 locally, stop it first.
 
-When you're done, stop the container with `docker compose down`. If you want to wipe the data and start fresh, use `docker compose down -v`.
+Tests: mvn test — 27 of them, one positive and one negative per method.
 
-One thing to watch out for: if you already have PostgreSQL running locally on port 5432, the container won't be able to start. Stop your local instance first.
+Logging
 
-To run the tests, use `mvn test`. There are 27 of them, two for every method in the service and repository layers. One test checks that the method works when it should and the other checks that it fails properly when it should.
+Logs go to bank.log, generated at runtime and not committed. Log in with account 1 / PIN 9999, then again with a wrong PIN, then cat bank.log for an INFO and a SEVERE entry. Database errors go to the log instead of the screen.
 
-## Transfers
+Transfers
 
-Transfers were the most complicated part. A transfer changes two accounts, and if only one of them ends up changing then money either gets created or destroyed. So both updates have to happen together or neither of them can.
+A transfer changes two accounts — if only one changes, money is created or destroyed. So AccountRepository.transfer turns off auto-commit, runs both updates, and commits only if both worked. Otherwise it rolls back.
 
-That's why AccountRepository.transfer manages its own connection instead of using try-with-resources like the other methods do. It turns off auto-commit, runs both updates, and only commits if both of them worked. If anything goes wrong it rolls back and neither account changes.
+A bug I found
 
-## A bug I found
+I tested transferring to an account that doesn't exist, expecting it to fail. It returned true.
 
-I wrote a test that transferred money to an account that doesn't exist. I expected it to fail, but it came back true.
+An UPDATE matching zero rows isn't an error in SQL — it succeeds without doing anything. The money left the first account, the second update did nothing, nothing threw, and it committed. The money was gone.
 
-The reason is that an UPDATE statement that doesn't match any rows isn't actually an error in SQL. It just succeeds without doing anything. So the money came out of the first account, the second update did nothing at all, no exception was ever thrown, and the whole thing committed. The money just disappeared.
+Fixed by checking the row count executeUpdate() returns and rolling back on zero.
 
-I fixed it by checking the number that executeUpdate() returns, which is how many rows it changed, and rolling back if it comes back as zero.
+Manual testing never caught it, because AccountService validates both accounts before calling the repository. Only a unit test hitting the repository directly could reach it.
 
-The interesting part is that I had run the application manually plenty of times and never hit this. AccountService checks that both accounts exist before it calls the repository, so going through the menu you never reach the repository's missing check. Only a unit test could find it, because the test calls the repository directly and skips the service.
+PINs
 
-## PINs
+Hashed with BCrypt before storage, so the real PIN is never in the database. gensalt() makes a new salt each time, so identical PINs produce different hashes. Login re-hashes what you typed using the stored salt and compares — nothing is decrypted.
 
-PINs get hashed with BCrypt before they go into the database, so the real PIN is never stored anywhere. gensalt() generates a new random salt every time, which means two people who pick the same PIN still end up with completely different hashes. When someone logs in, nothing gets decrypted. It takes the PIN they typed, hashes it using the salt that's stored inside the existing hash, and checks whether the two match.
-
-## Logging
-
-Successful logins and failed login attempts get written to bank.log. Database errors go into the log file instead of being printed on screen, so the user gets a normal message instead of a stack trace.
-
-## Things I'd fix
-
-The tests run against the real database, so every time I run them the balances change and new accounts get created. They still pass because I wrote them to check the difference rather than an exact number, but I'd use a separate test database if I did it again.
-
-The balance update and the transaction record go through two different connections, so if the program crashed in between them you'd have a balance that changed with no record of it.
-
-Transfers only show up in the sender's transaction history. getTransactionsByAccountId only filters on account_id, and a transfer stores the other account in related_account_id, so the person receiving the money doesn't see it in their history.
-
-There's nothing handling two operations happening at the same time. The transaction gives atomicity but not isolation, so two transfers on the same account at once could interfere with each other.
+Things I'd fix
+Tests run against the real database and mutate it each run
+The balance update and transaction record use separate connections, so a crash between them loses the record
+Transfers only appear in the sender's history
+No concurrency handling — atomicity but not isolation
